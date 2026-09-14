@@ -168,19 +168,23 @@ jobs:
             --input ../extracts/${{ matrix.region.id }}.osm.pbf \
             --graph-id ${{ matrix.region.id }} \
             --profile ${{ github.event.inputs.profile }} \
-            --output ../output
+            --output ../out
+            put
 
+  
       - name: Verify output files
         run: |
           echo "📄 Результат:"
           ls -lh output/
+          # geo_route_finder добавляет суффикс профиля (_car, _bicycle и т.д.)
+          FILE_PREFIX="${{ matrix.region.id }}_${{ github.event.inputs.profile }}"
           for ext in graph index meta; do
-            FILE="output/${{ matrix.region.id }}.$ext"
+            FILE="output/${FILE_PREFIX}.$ext"
             if [ -f "$FILE" ]; then
               SIZE=$(du -h "$FILE" | awk '{print $1}')
-              echo "  ✅ ${{ matrix.region.id }}.$ext — $SIZE"
+              echo "  ✅ ${FILE_PREFIX}.$ext — $SIZE"
             else
-              echo "  ❌ ${{ matrix.region.id }}.$ext НЕ НАЙДЕН!"
+              echo "  ❌ ${FILE_PREFIX}.$ext НЕ НАЙДЕН!"
               exit 1
             fi
           done
@@ -188,12 +192,13 @@ jobs:
       - name: Package as tar.gz
         run: |
           ARCHIVE="${{ matrix.region.id }}_routing_${{ github.event.inputs.profile }}.tar.gz"
+          FILE_PREFIX="${{ matrix.region.id }}_${{ github.event.inputs.profile }}"
           echo "📦 Упаковка: $ARCHIVE"
           cd output
           tar -czvf "../$ARCHIVE" \
-            ${{ matrix.region.id }}.graph \
-            ${{ matrix.region.id }}.index \
-            ${{ matrix.region.id }}.meta
+            ${FILE_PREFIX}.graph \
+            ${FILE_PREFIX}.index \
+            ${FILE_PREFIX}.meta
           cd ..
           ls -lh "$ARCHIVE"
 
