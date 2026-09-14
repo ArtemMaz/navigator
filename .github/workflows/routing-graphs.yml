@@ -137,11 +137,23 @@ jobs:
       # ═══ 6. Упаковываем артефакты ═══
       - name: Package artifacts
         run: |
+          echo "🔍 Структура graph_output:"
+          find graph_output -type f | sort
+          echo ""
+          echo "📦 Размеры файлов:"
+          ls -lhR graph_output/
+          
+          # Определяем реальную структуру файлов
           cd graph_output
+          
+          # Ищем все .graph, .index, .meta файлы
+          GRAPH_FILES=$(find . -name "*.graph" -o -name "*.index" -o -name "*.meta")
+          echo "Найдены файлы: $GRAPH_FILES"
+          
+          # Упаковываем ВСЕ найденные файлы
           tar -czvf ../${{ github.event.inputs.region_id }}_routing_${{ github.event.inputs.profile }}.tar.gz \
-            ${{ github.event.inputs.region_id }}.graph \
-            ${{ github.event.inputs.region_id }}.index \
-            ${{ github.event.inputs.region_id }}.meta
+            $(find . -name "*.graph" -o -name "*.index" -o -name "*.meta")
+          
           cd ..
           ls -lh *.tar.gz
 
