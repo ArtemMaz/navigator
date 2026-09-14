@@ -137,15 +137,25 @@ jobs:
       # ═══ 6. Упаковываем артефакты ═══
       - name: Package artifacts
         run: |
-          echo "🔍 Диагностика структуры файлов..."
-          find graph_output -type f -exec ls -lh {} \;
+          echo "🔍 Структура graph_output:"
+          find graph_output -type f | sort
+          echo ""
+          echo "📦 Размеры файлов:"
+          ls -lhR graph_output/
           
-          # Упаковываем ВСЮ директорию graph_output
-          tar -czvf ${{ github.event.inputs.region_id }}_routing_${{ github.event.inputs.profile }}.tar.gz \
-            -C graph_output .
+          # Определяем реальную структуру файлов
+          cd graph_output
           
+          # Ищем все .graph, .index, .meta файлы
+          GRAPH_FILES=$(find . -name "*.graph" -o -name "*.index" -o -name "*.meta")
+          echo "Найдены файлы: $GRAPH_FILES"
+          
+          # Упаковываем ВСЕ найденные файлы
+          tar -czvf ../${{ github.event.inputs.region_id }}_routing_${{ github.event.inputs.profile }}.tar.gz \
+            $(find . -name "*.graph" -o -name "*.index" -o -name "*.meta")
+          
+          cd ..
           ls -lh *.tar.gz
-          echo "✅ Архив создан"
 
       # ═══ 7. Публикация в GitHub Release ═══
       - name: Publish to GitHub Release
