@@ -1,0 +1,166 @@
+name: Build Routing Graphs (OSM PBF → GeoGraph)
+
+on:
+  workflow_dispatch:
+    inputs:
+      region_id:
+        description: 'ID региона (например, russia_ural_center)'
+        default: 'russia_ural_center'
+        type: string
+      bbox:
+        description: 'Bbox: west_lon,south_lat,east_lon,north_lat'
+        default: '43,54,62,62'
+        type: string
+      profile:
+        description: 'Профиль маршрутизации'
+        default: 'car'
+        type: choice
+        options:
+          - car
+          - bicycle
+          - motorcycle
+
+jobs:
+  build-graph:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ═══ 1. Установка osmium для вырезания bbox из PBF ═══
+      - name: Install osmium-tool
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y osmium-tool
+          osmium --version
+
+      # ═══ 2. Установка Dart SDK ═══
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+
+      # ═══ 3. Скачиваем PBF России с Geofabrik (резервное зеркало OSM France) ═══
+      - name: Download Russia PBF
+        run: |
+          mkdir -p pbf_data
+          echo "📥 Скачиваем russia-latest.osm.pbf..."
+          # Geofabrik — основной источник
+          curl -L --retry 5 --retry-delay 10 \
+            -o pbf_data/russia-latest.osm.pbf \
+            "https://download.geofabrik.de/russia-latest.osm.pbf" || \
+          curl -L --retry 5 \
+            -o pbf_data/russia-latest.osm.pbf \
+            "http://download.openstreetmap.fr/extracts/russia-latest.osm.pbf"
+          ls -lh pbf_data/
+
+      # ═══ 4. Вырезаем bbox Урала из полного PBF ═══
+      - name: Extract bbox
+        run: |
+          mkdir -p extracts
+          osmium extract \
+            --bbox=${{ github.event.inputs.bbox }} \
+            --overwrite \
+            -o extracts/${{ github.event.inputs.region_id }}.osm.pbf \
+            pbf_data/russia-latest.osm.pbf
+          ls -lh extracts/
+          echo "✅ Файл extracts/${{ github.event.inputs.region_id }}.osm.pbf готов"
+
+      # ═══ 5. Компиляция графа через Dart-скрипт ═══
+      - name: Compile routing graph
+        run: |
+          mkdir -p graph_output scripts
+          cat > scripts/compile_graph.dart << 'DART_SCRIPT'
+          import 'dart:io';
+          import 'package:geo_route_finder/geo_route_finder.dart';
+
+          Future<void> main(List<String> args) async {
+            final pbfPath = args[0];
+            final regionId = args[1];
+            final profileName = args[2];
+            final outDir = args[3];
+
+            final profile = switch (profileName) {
+              'bicycle' => VehicleProfile.bicycle,
+              'motorcycle' => VehicleProfile.motorcycle,
+              _ => VehicleProfile.car,
+            };
+
+            print('🔧 Компиляция: $pbfPath → $outDir/$regionId ($profileName)');
+
+            final storage = LocalFileStorage(directory: outDir);
+            final converter = OsmConverter(
+              profile: profile,
+              compress: true,  // Сжатие убирает 80-95% мусорных узлов
+            );
+
+            final sw = Stopwatch()..start();
+            await converter.convert(
+              inputFile: pbfPath,
+              storage: storage,
+              graphId: regionId,
+            );
+            sw.stop();
+
+            print('✅ Граф скомпилирован за ${sw.elapsed.inSeconds} сек');
+
+            // Выводим размеры файлов
+            for (final ext in ['.graph', '.index', '.meta']) {
+              final f = File('$outDir/$regionId$ext');
+              if (await f.exists()) {
+                final size = await f.length();
+                print('   📄 $regionId$ext: ${(size / 1024 / 1024).toStringAsFixed(2)} MB');
+              }
+            }
+          }
+          DART_SCRIPT
+
+          # Инициализируем временный Dart-проект с нужными зависимостями
+          cd scripts
+          cat > pubspec.yaml << 'PUBSPEC'
+          name: graph_compiler
+          environment:
+            sdk: ^3.5.0
+          dependencies:
+            geo_route_finder: ^1.1.0
+          PUBSPEC
+
+          dart pub get
+          dart run compile_graph.dart \
+            ../extracts/${{ github.event.inputs.region_id }}.osm.pbf \
+            ${{ github.event.inputs.region_id }} \
+            ${{ github.event.inputs.profile }} \
+            ../graph_output
+
+      # ═══ 6. Упаковываем артефакты ═══
+      - name: Package artifacts
+        run: |
+          cd graph_output
+          tar -czvf ../${{ github.event.inputs.region_id }}_routing_${{ github.event.inputs.profile }}.tar.gz \
+            ${{ github.event.inputs.region_id }}.graph \
+            ${{ github.event.inputs.region_id }}.index \
+            ${{ github.event.inputs.region_id }}.meta
+          cd ..
+          ls -lh *.tar.gz
+
+      # ═══ 7. Публикация в GitHub Release ═══
+      - name: Publish to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: routing-graphs-v1
+          name: "Routing Graphs v1"
+          body: |
+            Скомпилированные графы дорог для офлайн-навигации.
+            **Регион:** ${{ github.event.inputs.region_id }}
+            **Bbox:** `${{ github.event.inputs.bbox }}`
+            **Профиль:** ${{ github.event.inputs.profile }}
+            **Формат:** geo_route_finder v1.1.0
+          files: |
+            ${{ github.event.inputs.region_id }}_routing_${{ github.event.inputs.profile }}.tar.gz
+            extracts/${{ github.event.inputs.region_id }}.osm.pbf
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
