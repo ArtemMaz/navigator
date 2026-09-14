@@ -1,0 +1,12 @@
+name: routing_graph_builder
+description: Build routing graphs from OSM PBF extracts
+version: 1.0.0
+publish_to: none
+
+environment:
+  sdk: ^3.5.0
+
+dependencies:
+  path: ^1.9.0
+  args: ^2.5.0
+  geo_route_finder: ^1.1.0
