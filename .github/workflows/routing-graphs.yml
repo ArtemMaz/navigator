@@ -5,273 +5,158 @@ on:
     inputs:
       profile:
         description: 'Профиль маршрутизации'
-        required: true
         default: 'car'
         type: choice
         options:
           - car
           - bicycle
           - motorcycle
-      tag:
-        description: 'Тег релиза (например: routing-graphs-v2)'
-        required: true
-        default: 'routing-graphs-v2'
-        type: string
 
 jobs:
-  # ══════════════════════════════════════════════════════
-  #  ФАЗА 1: Скачиваем PBF России (один раз, кэшируем)
-  # ══════════════════════════════════════════════════════
-  download-pbf:
+  build-graph:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
-    outputs:
-      pbf-size: ${{ steps.download.outputs.size }}
-    steps:
-      - name: Free disk space
-        uses: jlumbroso/free-disk-space@main
-        with:
-          tool-cache: false
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: false
-          docker-images: true
-          swap-storage: true
+    timeout-minutes: 180
+    permissions:
+      contents: write
+    
+    # 🚀 МАТРИЦА: Запускает 4 параллельных джоба для каждого региона
+    strategy:
+      fail-fast: false
+      matrix:
+        region:
+          - { id: 'russia_west', bbox: '19,41,46,72', desc: 'Запад РФ (Москва, СПб, Юг)' }
+          - { id: 'russia_ural', bbox: '44,44,66,72', desc: 'Урал и Поволжье' }
+          - { id: 'russia_siberia', bbox: '65,46,106,78', desc: 'Сибирь' }
+          - { id: 'russia_east', bbox: '105,41,180,78', desc: 'Дальний Восток' }
 
+    steps:
+      - uses: actions/checkout@v4
+
+      # ═══ 1. Установка osmium для вырезания bbox из PBF ═══
       - name: Install osmium-tool
         run: |
           sudo apt-get update
           sudo apt-get install -y osmium-tool
           osmium --version
 
-      # Кэшируем скачанный PBF (3.5 ГБ)
-      - name: Cache Russia PBF
-        uses: actions/cache@v4
-        id: cache-pbf
-        with:
-          path: russia-latest.osm.pbf
-          key: russia-pbf-${{ hashFiles('**/pbf-url.txt') }}
-          restore-keys: russia-pbf-
-
-      - name: Get PBF download URL
-        id: url
-        run: |
-          # Geofabrik Russia — обновляется ежедневно
-          echo "url=https://download.geofabrik.de/russia-latest.osm.pbf" >> $GITHUB_OUTPUT
-          echo "https://download.geofabrik.de/russia-latest.osm.pbf" > pbf-url.txt
-
-      - name: Download Russia PBF
-        if: steps.cache-pbf.outputs.cache-hit != 'true'
-        run: |
-          echo "📥 Скачиваем Russia PBF (~3.5 ГБ)..."
-          curl -L -o russia-latest.osm.pbf --progress-bar \
-            "${{ steps.url.outputs.url }}"
-          ls -lh russia-latest.osm.pbf
-
-      - name: Verify PBF
-        id: download
-        run: |
-          SIZE=$(stat -c%s russia-latest.osm.pbf)
-          echo "size=$SIZE" >> $GITHUB_OUTPUT
-          echo "✅ PBF готов: $(ls -lh russia-latest.osm.pbf | awk '{print $5}')"
-          osmium fileinfo russia-latest.osm.pbf
-
-      # Извлекаем 4 региона через osmium
-      - name: Extract 4 regions
-        run: |
-          mkdir -p extracts
-
-          echo "✂️  Извлечение: russia_west..."
-          osmium extract -b 19.0,41.0,46.0,62.0 \
-            russia-latest.osm.pbf \
-            -o extracts/russia_west.osm.pbf \
-            --overwrite
-
-          echo "✂️  Извлечение: russia_ural..."
-          osmium extract -b 44.0,44.0,68.0,64.0 \
-            russia-latest.osm.pbf \
-            -o extracts/russia_ural.osm.pbf \
-            --overwrite
-
-          echo "✂️  Извлечение: russia_siberia..."
-          osmium extract -b 66.0,44.0,115.0,74.0 \
-            russia-latest.osm.pbf \
-            -o extracts/russia_siberia.osm.pbf \
-            --overwrite
-
-          echo "✂️  Извлечение: russia_east..."
-          osmium extract -b 110.0,40.0,180.0,75.0 \
-            russia-latest.osm.pbf \
-            -o extracts/russia_east.osm.pbf \
-            --overwrite
-
-          echo ""
-          echo "📦 Размеры экстрактов:"
-          ls -lh extracts/
-
-      - name: Upload extracts as artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: pbf-extracts
-          path: extracts/
-          retention-days: 1
-
-  # ══════════════════════════════════════════════════════
-  #  ФАЗА 2: Сборка графов (параллельно для 4 регионов)
-  # ══════════════════════════════════════════════════════
-  build-graph:
-    needs: download-pbf
-    runs-on: ubuntu-latest
-    timeout-minutes: 180
-    strategy:
-      fail-fast: false
-      matrix:
-        region:
-          - id: russia_west
-            desc: "Запад: Москва, СПб, Калининград, Ростов"
-          - id: russia_ural
-            desc: "Урал: Казань, Пермь, Екатеринбург, Челябинск"
-          - id: russia_siberia
-            desc: "Сибирь: Новосибирск, Красноярск, Иркутск"
-          - id: russia_east
-            desc: "Дальний Восток: Владивосток, Хабаровск, Якутск"
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Dart
-        uses: dart-lang/setup-dart@v1
+      # ═══ 2. Установка Dart SDK ═══
+      - uses: dart-lang/setup-dart@v1
         with:
           sdk: stable
 
-      - name: Download PBF extracts
-        uses: actions/download-artifact@v4
-        with:
-          name: pbf-extracts
-          path: extracts/
-
-      - name: Verify extract
+      # ═══ 3. Скачиваем PBF России (каждый джоб качает свой экземпляр) ═══
+      - name: Download Russia PBF
         run: |
-          echo "📦 Регион: ${{ matrix.region.id }}"
-          echo "📝 ${{ matrix.region.desc }}"
-          ls -lh extracts/${{ matrix.region.id }}.osm.pbf
+          mkdir -p pbf_data
+          echo "📥 Скачиваем russia-latest.osm.pbf..."
+          curl -L --retry 5 --retry-delay 10 \
+            -o pbf_data/russia-latest.osm.pbf \
+            "https://download.geofabrik.de/russia-latest.osm.pbf" || \
+          curl -L --retry 5 \
+            -o pbf_data/russia-latest.osm.pbf \
+            "http://download.openstreetmap.fr/extracts/russia-latest.osm.pbf"
+          ls -lh pbf_data/
 
-      - name: Install Dart dependencies
-        working-directory: tools
-        run: dart pub get
-
-      - name: Build routing graph
-        working-directory: tools
+      # ═══ 4. Вырезаем bbox региона из полного PBF ═══
+      - name: Extract bbox
         run: |
-          echo "🔨 Сборка графа: ${{ matrix.region.id }} (${{ github.event.inputs.profile }})"
-          dart run build_graph.dart \
-            --input ../extracts/${{ matrix.region.id }}.osm.pbf \
-            --graph-id ${{ matrix.region.id }} \
-            --profile ${{ github.event.inputs.profile }} \
-            --output ../out
+          mkdir -p extracts
+          osmium extract \
+            --bbox=${{ matrix.region.bbox }} \
+            --overwrite \
+            -o extracts/${{ matrix.region.id }}.osm.pbf \
+            pbf_data/russia-latest.osm.pbf
+          ls -lh extracts/
+          echo "✅ Файл extracts/${{ matrix.region.id }}.osm.pbf готов"
 
-  
-      - name: Verify output files
+      # ═══ 5. Компиляция графа через inline Dart-скрипт (Рабочий вариант) ═══
+      - name: Compile routing graph
         run: |
-          echo "📄 Результат:"
-          ls -lh output/
-          FILE_PREFIX="${{ matrix.region.id }}_${{ github.event.inputs.profile }}"
-          for ext in graph index meta; do
-            FILE="output/${FILE_PREFIX}.$ext"
-            if [ -f "$FILE" ]; then
-              SIZE=$(du -h "$FILE" | awk '{print $1}')
-              echo "  ✅ ${FILE_PREFIX}.$ext — $SIZE"
-            else
-              echo "  ❌ ${FILE_PREFIX}.$ext НЕ НАЙДЕН!"
-              exit 1
-            fi
-          done
+          mkdir -p graph_output scripts
+          cat > scripts/compile_graph.dart << 'DART_SCRIPT'
+          import 'dart:io';
+          import 'package:geo_route_finder/geo_route_finder.dart';
+          
+          Future<void> main(List<String> args) async {
+            final pbfPath = args[0];
+            final regionId = args[1];
+            final profileName = args[2];
+            final outDir = args[3];
+            
+            final profile = switch (profileName) {
+              'bicycle' => VehicleProfile.bicycle,
+              'motorcycle' => VehicleProfile.motorcycle,
+              _ => VehicleProfile.car,
+            };
+            
+            print('🔧 Компиляция: $pbfPath → $outDir ($regionId, $profileName)');
+            final storage = LocalFileStorage(directory: outDir);
+            final converter = OsmConverter(
+              profile: profile,
+              compress: true,
+            );
+            
+            final sw = Stopwatch()..start();
+            await converter.convert(
+              inputFile: pbfPath,
+              storage: storage,
+              graphId: regionId,
+            );
+            sw.stop();
+            print('✅ Граф скомпилирован за ${sw.elapsed.inSeconds} сек');
+          }
+          DART_SCRIPT
+          
+          cd scripts
+          cat > pubspec.yaml << 'PUBSPEC'
+          name: graph_compiler
+          environment:
+            sdk: ^3.5.0
+          dependencies:
+            geo_route_finder: ^1.1.0
+          PUBSPEC
+          
+          dart pub get
+          dart run compile_graph.dart \
+            ../extracts/${{ matrix.region.id }}.osm.pbf \
+            ${{ matrix.region.id }} \
+            ${{ github.event.inputs.profile }} \
+            ../graph_output
 
-      - name: Package as tar.gz
+      # ═══ 6. Умная упаковка артефактов (учитывает суффикс _car) ═══
+      - name: Package artifacts
         run: |
-          ARCHIVE="${{ matrix.region.id }}_routing_${{ github.event.inputs.profile }}.tar.gz"
-          FILE_PREFIX="${{ matrix.region.id }}_${{ github.event.inputs.profile }}"
-          echo "📦 Упаковка: $ARCHIVE"
-          cd output
-          tar -czvf "../$ARCHIVE" \
-            ${FILE_PREFIX}.graph \
-            ${FILE_PREFIX}.index \
-            ${FILE_PREFIX}.meta
+          echo "🔍 Структура graph_output:"
+          ls -lhR graph_output/
+          
+          cd graph_output
+          # Ищем все файлы графа (с учетом суффикса профиля, например russia_east_car.graph)
+          FILES=$(find . -type f \( -name "*.graph" -o -name "*.index" -o -name "*.meta" \))
+          echo "Найдены файлы: $FILES"
+          
+          if [ -z "$FILES" ]; then
+            echo "❌ ОШИБКА: Файлы графа не найдены!"
+            exit 1
+          fi
+          
+          tar -czvf ../${{ matrix.region.id }}_routing_${{ github.event.inputs.profile }}.tar.gz $FILES
           cd ..
-          ls -lh "$ARCHIVE"
+          ls -lh *.tar.gz
 
-      - name: Upload graph archive
-        uses: actions/upload-artifact@v4
-        with:
-          name: graph-${{ matrix.region.id }}
-          path: ${{ matrix.region.id }}_routing_${{ github.event.inputs.profile }}.tar.gz
-          retention-days: 1
-
-  # ══════════════════════════════════════════════════════
-  #  ФАЗА 3: Публикация в GitHub Release
-  # ══════════════════════════════════════════════════════
-  publish:
-    needs: build-graph
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download all graph archives
-        uses: actions/download-artifact@v4
-        with:
-          pattern: graph-*
-          merge-multiple: true
-          path: archives/
-
-      - name: List archives
-        run: |
-          echo "📦 Архивы для публикации:"
-          ls -lh archives/
-
-      - name: Generate checksums
-        run: |
-          cd archives
-          sha256sum *.tar.gz > SHA256SUMS.txt
-          cat SHA256SUMS.txt
-          cd ..
-
-      - name: Create GitHub Release
+      # ═══ 7. Публикация в GitHub Release ═══
+      - name: Publish to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.inputs.tag }}
-          name: "Графы дорог России (${{ github.event.inputs.tag }})"
+          tag_name: routing-graphs-v2
+          name: "Routing Graphs v2 (Russia x4)"
           body: |
-            ## 🚗 Офлайн-графы дорог для навигации
-
-            **Профиль:** `${{ github.event.inputs.profile }}`
-            **Источник:** OpenStreetMap (Geofabrik, ${{ github.run_id }})
-            **Сборка:** [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
-
-            ### 🗺️ 4 региона России
-
-            | Файл | Регион | Города |
-            |------|--------|--------|
-            | `russia_west_routing_${{ github.event.inputs.profile }}.tar.gz` | Запад | Москва, СПб, Калининград, Ростов, Воронеж, Волгоград |
-            | `russia_ural_routing_${{ github.event.inputs.profile }}.tar.gz` | Урал | Казань, Пермь, Екатеринбург, Челябинск, Уфа, Самара |
-            | `russia_siberia_routing_${{ github.event.inputs.profile }}.tar.gz` | Сибирь | Новосибирск, Красноярск, Иркутск, Омск, Томск |
-            | `russia_east_routing_${{ github.event.inputs.profile }}.tar.gz` | Дальний Восток | Владивосток, Хабаровск, Якутск, Магадан, Камчатка |
-
-            ### 📥 Использование в приложении
-
-            Графы скачиваются автоматически при выборе маршрута.
-            Базовый URL: `${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.event.inputs.tag }}/`
-
-            ### 📦 Формат архива
-
-            Каждый `.tar.gz` содержит 3 файла:
-            - `{region}.graph` — CSR-массивы графа
-            - `{region}.index` — KD-дерево для поиска ближайших узлов
-            - `{region}.meta` — JSON-метаданные с контрольными суммами
+            Скомпилированные графы дорог для офлайн-навигации.
+            **Регион:** ${{ matrix.region.desc }} (`${{ matrix.region.id }}`)
+            **Bbox:** `${{ matrix.region.bbox }}`
+            **Профиль:** ${{ github.event.inputs.profile }}
+            **Формат:** geo_route_finder v1.1.0
           files: |
-            archives/*.tar.gz
-            archives/SHA256SUMS.txt
+            ${{ matrix.region.id }}_routing_${{ github.event.inputs.profile }}.tar.gz
           draft: false
           prerelease: false
         env:
