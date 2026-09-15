@@ -11,14 +11,10 @@ on:
           - car
           - bicycle
           - motorcycle
-      hf_repo:
-        description: 'HuggingFace dataset repo (username/repo-name)'
-        default: 'Gitnbghb/github-actions'
-        type: string
 
 jobs:
   build-graph:
-    runs-on: ubuntu-latest-8-cores  # ← ИЗМЕНЕНО: 32 ГБ RAM вместо 7 ГБ
+    runs-on: ubuntu-latest
     timeout-minutes: 360
     permissions:
       contents: write
@@ -26,19 +22,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # ═══ 0. 🚨 ОСВОБОЖДЕНИЕ МЕСТА (Критично для PBF 4 ГБ!) ═══
-      - name: Free up disk space
-        uses: jlumbroso/free-disk-space@main
-        with:
-          tool-cache: false
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: true
-          docker-images: true
-          swap-storage: true
-
-      # ═══ 1. Установка osmium-tool ═══
+      # ═══ 1. Установка osmium-tool (на случай если понадобится) ═══
       - name: Install osmium-tool
         run: |
           sudo apt-get update
@@ -50,15 +34,11 @@ jobs:
         with:
           sdk: stable
 
-      # ═══ 3. Установка HuggingFace CLI ═══
-      - name: Install HuggingFace CLI
-        run: pip install "huggingface_hub==0.25.2"
-
-      # ═══ 4. Скачиваем полный PBF России (~4 ГБ) ═══
+      # ═══ 3. Скачиваем полный PBF России (~2.5 ГБ) ═══
       - name: Download Russia PBF
         run: |
           mkdir -p pbf_data
-          echo "📥 Скачиваем russia-latest.osm.pbf..."
+          echo "📥 Скачиваем russia-latest.osm.pbf (~2.5 ГБ)..."
           curl -L --retry 5 --retry-delay 10 \
             -o pbf_data/russia-latest.osm.pbf \
             "https://download.geofabrik.de/russia-latest.osm.pbf" || \
@@ -67,7 +47,7 @@ jobs:
             "http://download.openstreetmap.fr/extracts/russia-latest.osm.pbf"
           ls -lh pbf_data/
 
-      # ═══ 5. Компиляция графа ВСЕЙ РОССИИ ═══
+      # ═══ 4. Компиляция графа ВСЕЙ РОССИИ через inline Dart-скрипт ═══
       - name: Compile routing graph
         run: |
           mkdir -p graph_output scripts
@@ -103,8 +83,9 @@ jobs:
               graphId: regionId,
             );
             sw.stop();
-            print('✅ Граф скомпилирован за ${sw.elapsed.inSeconds} сек (${sw.elapsed.inMinutes} мин)');
+            print('✅ Граф скомпилирован за ${sw.elapsed.inSeconds} сек (${(sw.elapsed.inMinutes)} мин)');
             
+            // Выводим размеры файлов
             for (final ext in ['.graph', '.index', '.meta']) {
               final f = File('$outDir/$regionId$ext');
               if (await f.exists()) {
@@ -131,7 +112,7 @@ jobs:
             ${{ github.event.inputs.profile }} \
             ../graph_output
 
-      # ═══ 6. Умная упаковка артефактов ═══
+      # ═══ 5. Умная упаковка артефактов ═══
       - name: Package artifacts
         run: |
           echo "🔍 Структура graph_output:"
@@ -146,39 +127,31 @@ jobs:
             exit 1
           fi
           
-          ARCHIVE="russia_routing_${{ github.event.inputs.profile }}.tar.gz"
-          tar -czvf "../$ARCHIVE" $FILES
+          tar -czvf ../russia_routing_${{ github.event.inputs.profile }}.tar.gz $FILES
           cd ..
-          
           ls -lh *.tar.gz
-          echo "ARCHIVE_NAME=$ARCHIVE" >> $GITHUB_ENV
 
-      # ═══ 7. Расчёт SHA256 checksum ═══
-      - name: Generate checksum
-        run: |
-          sha256sum "$ARCHIVE_NAME" > "${ARCHIVE_NAME}.sha256"
-          cat "${ARCHIVE_NAME}.sha256"
-
-      # ═══ 8. 🆕 ЗАГРУЗКА В HUGGINGFACE DATASET ═══
-      - name: Upload to HuggingFace
+      # ═══ 6. Публикация в GitHub Release ═══
+      - name: Publish to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: routing-graphs-v3
+          name: "Routing Graphs v3 (Russia Full)"
+          body: |
+            Скомпилированный граф дорог **всей России** для офлайн-навигации.
+            
+            **Регион:** Россия (полная территория)
+            **Профиль:** ${{ github.event.inputs.profile }}
+            **Формат:** geo_route_finder v1.1.0
+            **Сжатие:** включено (~80% узлов удалено)
+            
+            ### 📦 Файлы в архиве:
+            - `russia.graph` — CSR-граф дорог
+            - `russia.index` — KD-дерево для поиска ближайших узлов
+            - `russia.meta` — метаданные (checksum, version)
+          files: |
+            russia_routing_${{ github.event.inputs.profile }}.tar.gz
+          draft: false
+          prerelease: false
         env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: |
-          echo "🔑 Проверяем авторизацию..."
-          huggingface-cli whoami
-          
-          echo "📤 Загружаем $ARCHIVE_NAME на HuggingFace..."
-          huggingface-cli upload ${{ github.event.inputs.hf_repo }} \
-            "$ARCHIVE_NAME" "$ARCHIVE_NAME" \
-            --repo-type=dataset \
-            --revision=main \
-            --commit-message="Update routing graph $ARCHIVE_NAME ($(date -u +%Y-%m-%d))"
-          
-          echo "📤 Загружаем checksum..."
-          huggingface-cli upload ${{ github.event.inputs.hf_repo }} \
-            "${ARCHIVE_NAME}.sha256" "${ARCHIVE_NAME}.sha256" \
-            --repo-type=dataset \
-            --revision=main \
-            --commit-message="Update routing checksum"
-          
-          echo "✅ Успешно загружено на HuggingFace!"
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
