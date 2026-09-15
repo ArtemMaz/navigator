@@ -13,7 +13,7 @@ on:
           - motorcycle
       hf_repo:
         description: 'HuggingFace dataset repo (username/repo-name)'
-        default: 'Gitnbghb/routing-graphs'
+        default: 'Gitnbghb/github-actions'
         type: string
 
 jobs:
@@ -26,16 +26,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # ═══ 0. 🚨 ОСВОБОЖДЕНИЕ МЕСТА (Критично для PBF 4 ГБ!) ═══
+      # Удаляет ненужные SDK (Android, .NET, Haskell), освобождая до 30-40 ГБ места
       - name: Free up disk space
         uses: jlumbroso/free-disk-space@main
         with:
           tool-cache: false
-          android: false
+          android: true
           dotnet: true
           haskell: true
-          large-packages: false
-          docker-images: false
-          swap-storage: false
+          large-packages: true
+          docker-images: true
+          swap-storage: true
 
       # ═══ 1. Установка osmium-tool ═══
       - name: Install osmium-tool
@@ -53,11 +55,11 @@ jobs:
       - name: Install HuggingFace CLI
         run: pip install "huggingface_hub==0.25.2"
 
-      # ═══ 4. Скачиваем полный PBF России (~2.5 ГБ) ═══
+      # ═══ 4. Скачиваем полный PBF России (~2.5-4 ГБ) ═══
       - name: Download Russia PBF
         run: |
           mkdir -p pbf_data
-          echo "📥 Скачиваем russia-latest.osm.pbf (~2.5 ГБ)..."
+          echo "📥 Скачиваем russia-latest.osm.pbf..."
           curl -L --retry 5 --retry-delay 10 \
             -o pbf_data/russia-latest.osm.pbf \
             "https://download.geofabrik.de/russia-latest.osm.pbf" || \
@@ -157,12 +159,11 @@ jobs:
         run: |
           sha256sum "$ARCHIVE_NAME" > "${ARCHIVE_NAME}.sha256"
           cat "${ARCHIVE_NAME}.sha256"
-          echo "CHECKSUM=$(cut -d' ' -f1 ${ARCHIVE_NAME}.sha256)" >> $GITHUB_ENV
 
-      # ═══ 8. 🆕 ЗАГРУЗКА В HUGGINGFACE DATASET ═══
+      # ═══ 8. 🆕 ЗАГРУЗКА В HUGGINGFACE DATASET (вместо GitHub Release) ═══
       - name: Upload to HuggingFace
         env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN_ROUTING }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           echo "🔑 Проверяем авторизацию..."
           huggingface-cli whoami
@@ -172,76 +173,13 @@ jobs:
             "$ARCHIVE_NAME" "$ARCHIVE_NAME" \
             --repo-type=dataset \
             --revision=main \
-            --commit-message="Update $ARCHIVE_NAME ($(date -u +%Y-%m-%d))"
+            --commit-message="Update routing graph $ARCHIVE_NAME ($(date -u +%Y-%m-%d))"
           
           echo "📤 Загружаем checksum..."
           huggingface-cli upload ${{ github.event.inputs.hf_repo }} \
             "${ARCHIVE_NAME}.sha256" "${ARCHIVE_NAME}.sha256" \
             --repo-type=dataset \
             --revision=main \
-            --commit-message="Update checksum"
+            --commit-message="Update routing checksum"
           
-          echo "✅ Загружено на HuggingFace"
-
-      # ═══ 9. Генерация index.json (для приложения) ═══
-      - name: Generate routing index.json
-        run: |
-          HF_REPO="${{ github.event.inputs.hf_repo }}"
-          BASE_URL="https://huggingface.co/datasets/$HF_REPO/resolve/main"
-          
-          cat > index.json <<EOF
-          {
-            "version": 1,
-            "generated": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-            "source": "$BASE_URL",
-            "graphs": [
-              {
-                "regionId": "russia",
-                "profile": "${{ github.event.inputs.profile }}",
-                "description": "Россия (полная территория)",
-                "archive": "$BASE_URL/${ARCHIVE_NAME}",
-                "checksum": "$BASE_URL/${ARCHIVE_NAME}.sha256",
-                "sha256": "$CHECKSUM"
-              }
-            ]
-          }
-          EOF
-          cat index.json
-
-      # ═══ 10. Загрузка index.json ═══
-      - name: Upload index.json to HuggingFace
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN_ROUTING }}
-        run: |
-          huggingface-cli upload ${{ github.event.inputs.hf_repo }} index.json index.json \
-            --repo-type=dataset \
-            --revision=main \
-            --commit-message="Update routing index.json"
-
-      # ═══ 11. Публикация в GitHub Release (информационно) ═══
-      - name: Publish info to GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: routing-graphs-hf-v1
-          name: "Routing Graphs (HuggingFace mirror)"
-          body: |
-            Скомпилированный граф дорог **всей России** для офлайн-навигации.
-            
-            ### 📥 Основное хранилище: HuggingFace
-            - **Все файлы**: https://huggingface.co/datasets/${{ github.event.inputs.hf_repo }}/tree/main
-            - **Прямая ссылка на архив**: https://huggingface.co/datasets/${{ github.event.inputs.hf_repo }}/resolve/main/${{ env.ARCHIVE_NAME }}
-            - **Index (для приложения)**: https://huggingface.co/datasets/${{ github.event.inputs.hf_repo }}/resolve/main/index.json
-            
-            ### 📊 Информация о сборке
-            - **Регион:** Россия (полная территория)
-            - **Профиль:** ${{ github.event.inputs.profile }}
-            - **Формат:** geo_route_finder v1.1.0
-            - **SHA256:** `${{ env.CHECKSUM }}`
-            
-            > ⚠️ Физический файл больше не хранится в GitHub Releases (лимит 2 GB). 
-            > Используйте ссылку на HuggingFace выше.
-          files: index.json
-          draft: false
-          prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          echo "✅ Успешно загружено на HuggingFace!"
