@@ -18,7 +18,7 @@ on:
 
 jobs:
   build-graph:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest-8-cores  # ← ИЗМЕНЕНО: 32 ГБ RAM вместо 7 ГБ
     timeout-minutes: 360
     permissions:
       contents: write
@@ -27,7 +27,6 @@ jobs:
       - uses: actions/checkout@v4
 
       # ═══ 0. 🚨 ОСВОБОЖДЕНИЕ МЕСТА (Критично для PBF 4 ГБ!) ═══
-      # Удаляет ненужные SDK (Android, .NET, Haskell), освобождая до 30-40 ГБ места
       - name: Free up disk space
         uses: jlumbroso/free-disk-space@main
         with:
@@ -55,7 +54,7 @@ jobs:
       - name: Install HuggingFace CLI
         run: pip install "huggingface_hub==0.25.2"
 
-      # ═══ 4. Скачиваем полный PBF России (~2.5-4 ГБ) ═══
+      # ═══ 4. Скачиваем полный PBF России (~4 ГБ) ═══
       - name: Download Russia PBF
         run: |
           mkdir -p pbf_data
@@ -160,7 +159,7 @@ jobs:
           sha256sum "$ARCHIVE_NAME" > "${ARCHIVE_NAME}.sha256"
           cat "${ARCHIVE_NAME}.sha256"
 
-      # ═══ 8. 🆕 ЗАГРУЗКА В HUGGINGFACE DATASET (вместо GitHub Release) ═══
+      # ═══ 8. 🆕 ЗАГРУЗКА В HUGGINGFACE DATASET ═══
       - name: Upload to HuggingFace
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
