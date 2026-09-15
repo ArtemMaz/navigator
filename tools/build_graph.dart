@@ -103,13 +103,14 @@ Future<void> main(List<String> args) async {
 
     // 4. Проверяем результат
     print('🔍 Шаг 4/4: Проверка файлов...');
+    final filePrefix = '${graphId}_$profileName'; // 🆕 Учитываем суффикс профиля
     for (final ext in ['.graph', '.index', '.meta']) {
-      final f = File(p.join(outputDir, '$graphId$ext'));
+      final f = File(p.join(outputDir, '$filePrefix$ext'));
       if (await f.exists()) {
         final sizeMB = (await f.length()) / 1024 / 1024;
-        print('   ✅ $graphId$ext — ${sizeMB.toStringAsFixed(2)} МБ');
+        print('   ✅ $filePrefix$ext — ${sizeMB.toStringAsFixed(2)} МБ');
       } else {
-        print('   ⚠️  $graphId$ext — не создан (будет создан при следующем запуске)');
+        print('   ⚠️  $filePrefix$ext — не создан');
       }
     }
 
