@@ -169,14 +169,12 @@ jobs:
             --graph-id ${{ matrix.region.id }} \
             --profile ${{ github.event.inputs.profile }} \
             --output ../out
-            put
 
   
       - name: Verify output files
         run: |
           echo "📄 Результат:"
           ls -lh output/
-          # geo_route_finder добавляет суффикс профиля (_car, _bicycle и т.д.)
           FILE_PREFIX="${{ matrix.region.id }}_${{ github.event.inputs.profile }}"
           for ext in graph index meta; do
             FILE="output/${FILE_PREFIX}.$ext"
