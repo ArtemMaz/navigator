@@ -1,4 +1,4 @@
-name: Build Routing Graphs (Russia 4 parts)
+name: Build Routing Graphs (Russia in 4 parts)
 
 on:
   workflow_dispatch:
@@ -13,10 +13,12 @@ on:
           - motorcycle
 
 jobs:
-  # ═══ ЭТАП 1: Скачиваем PBF ОДИН раз ═══
+  # ═══════════════════════════════════════════════════════════
+  # ЭТАП 1: Скачиваем PBF ОДИН раз и сохраняем как артефакт
+  # ═══════════════════════════════════════════════════════════
   download-pbf:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 60
     steps:
       - name: Download Russia PBF
         run: |
@@ -37,7 +39,9 @@ jobs:
           path: pbf_data/russia-latest.osm.pbf
           retention-days: 1
 
-  # ═══ ЭТАП 2: Параллельная сборка 4-х регионов ═══
+  # ═══════════════════════════════════════════════════════════
+  # ЭТАП 2: Параллельная сборка 4-х регионов (matrix)
+  # ═══════════════════════════════════════════════════════════
   build-graphs:
     needs: download-pbf
     runs-on: ubuntu-latest
@@ -47,10 +51,10 @@ jobs:
       matrix:
         region:
           - id: russia_west_europe
-            name: "Европейская часть"
+            name: "Европейская часть России"
             bbox: "19,40,62,82"
           - id: russia_ural_siberia
-            name: "Урал и Зап. Сибирь"
+            name: "Урал и Западная Сибирь"
             bbox: "59,40,97,82"
           - id: russia_east_siberia
             name: "Восточная Сибирь"
@@ -66,6 +70,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y osmium-tool
+          osmium --version
 
       - uses: dart-lang/setup-dart@v1
         with:
@@ -86,7 +91,7 @@ jobs:
             -o extracts/${{ matrix.region.id }}.osm.pbf \
             pbf_data/russia-latest.osm.pbf
           ls -lh extracts/
-          echo "✅ Готов: extracts/${{ matrix.region.id }}.osm.pbf"
+          echo "✅ Файл extracts/${{ matrix.region.id }}.osm.pbf готов"
 
       - name: Compile routing graph
         run: |
@@ -107,9 +112,7 @@ jobs:
               _ => VehicleProfile.car,
             };
 
-            print('🔧 Компиляция: $pbfPath → $outDir ($regionId, $profileName)');
-            final pbfSize = (await File(pbfPath).length() / 1024 / 1024).toStringAsFixed(0);
-            print('📊 Файл PBF: $pbfSize МБ');
+            print('🔧 Компиляция: $pbfPath → $outDir/$regionId ($profileName)');
 
             final storage = LocalFileStorage(directory: outDir);
             final converter = OsmConverter(
@@ -124,7 +127,8 @@ jobs:
               graphId: regionId,
             );
             sw.stop();
-            print('✅ Граф готов за ${sw.elapsed.inMinutes} мин');
+
+            print('✅ Граф скомпилирован за ${sw.elapsed.inSeconds} сек');
 
             for (final ext in ['.graph', '.index', '.meta']) {
               final f = File('$outDir/$regionId$ext');
@@ -169,7 +173,9 @@ jobs:
             extracts/${{ matrix.region.id }}.osm.pbf
           retention-days: 1
 
-  # ═══ ЭТАП 3: Публикация всех 4-х в один релиз ═══
+  # ═══════════════════════════════════════════════════════════
+  # ЭТАП 3: Публикация всех 4-х файлов в ОДИН GitHub Release
+  # ═══════════════════════════════════════════════════════════
   publish-release:
     needs: build-graphs
     runs-on: ubuntu-latest
@@ -183,8 +189,10 @@ jobs:
           merge-multiple: true
           path: release_files
 
-      - name: List files
-        run: ls -lhR release_files/
+      - name: List release files
+        run: |
+          echo "📦 Файлы для публикации:"
+          ls -lhR release_files/
 
       - name: Publish to GitHub Release
         uses: softprops/action-gh-release@v2
@@ -192,14 +200,17 @@ jobs:
           tag_name: routing-graphs-russia-4parts
           name: "Russia Routing Graphs (4 parts)"
           body: |
-            🇷🇺 Графы дорог России для офлайн-навигации (4 части с перекрытиями ~3°)
+            🇷🇺 Скомпилированные графы дорог России для офлайн-навигации.
+            Разбито на 4 части с перекрытиями ~3° для корректной маршрутизации через границы.
             
+            **Файлы:**
             - `russia_west_europe` — Европейская часть (19°E–62°E)
-            - `russia_ural_siberia` — Урал + Зап. Сибирь (59°E–97°E)
+            - `russia_ural_siberia` — Урал и Зап. Сибирь (59°E–97°E)
             - `russia_east_siberia` — Восточная Сибирь (94°E–137°E)
             - `russia_far_east` — Дальний Восток (134°E–180°E)
             
             **Профиль:** ${{ github.event.inputs.profile }}
+            **Формат:** geo_route_finder v1.1.0
           files: |
             release_files/*.tar.gz
             release_files/*.osm.pbf
