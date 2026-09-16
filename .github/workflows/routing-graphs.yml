@@ -1,4 +1,4 @@
-name: Build Routing Graphs (Russia 5 regions)
+name: Build Routing Graphs (Russia 6 regions)
 
 on:
   workflow_dispatch:
@@ -13,9 +13,6 @@ on:
           - motorcycle
 
 jobs:
-  # ═══════════════════════════════════════════════════
-  # ШАГ 1: Один раз скачиваем полный PBF России
-  # ═══════════════════════════════════════════════════
   download-pbf:
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -39,26 +36,26 @@ jobs:
           path: pbf_data/russia-latest.osm.pbf
           retention-days: 1
 
-  # ═══════════════════════════════════════════════════
-  # ШАГ 2: Параллельная сборка 5 регионов (matrix)
-  # ═══════════════════════════════════════════════════
   build-region:
     needs: download-pbf
     runs-on: ubuntu-latest
     timeout-minutes: 180
     strategy:
-      fail-fast: false  # если один регион упал, остальные продолжают работу
+      fail-fast: false
       matrix:
         include:
           - region_id: russia_west
             bbox: '19,43,45,72'
             description: 'Запад (Калининград, СПб, Москва)'
           - region_id: russia_south
-            bbox: '35,41,60,58'
-            description: 'Юг/Поволжье (Краснодар, Кавказ, Самара)'
+            bbox: '36,43,48,52'
+            description: 'Юг (Краснодар, Ростов, Кавказ, Волгоград)'
+          - region_id: russia_volga
+            bbox: '44,50,60,58'
+            description: 'Поволжье (Самара, Казань, Саратов)'
           - region_id: russia_ural
             bbox: '50,50,80,70'
-            description: 'Урал (Казань, Пермь, Екатеринбург)'
+            description: 'Урал (Пермь, Екатеринбург, Челябинск)'
           - region_id: russia_siberia
             bbox: '70,48,115,75'
             description: 'Сибирь (Новосибирск, Красноярск, Иркутск)'
@@ -81,7 +78,6 @@ jobs:
         with:
           sdk: stable
 
-      # Скачиваем общий PBF из артефакта (быстрее, чем 5 раз с Geofabrik)
       - name: Download shared PBF artifact
         uses: actions/download-artifact@v4
         with:
@@ -93,7 +89,6 @@ jobs:
           ls -lh pbf_data/
           test -f pbf_data/russia-latest.osm.pbf || (echo "❌ PBF не найден!" && exit 1)
 
-      # Вырезаем bbox региона
       - name: Extract bbox for ${{ matrix.region_id }}
         run: |
           mkdir -p extracts
@@ -105,6 +100,16 @@ jobs:
             -o extracts/${{ matrix.region_id }}.osm.pbf \
             pbf_data/russia-latest.osm.pbf
           ls -lh extracts/
+
+      # 🆕 ОГРАНИЧЕНИЕ RAM: swap 8 GB для подстраховки
+      - name: Create swap space
+        run: |
+          sudo fallocate -l 8G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          sudo swapon --show
+          free -h
 
       - name: Compile routing graph
         run: |
@@ -131,6 +136,7 @@ jobs:
             print('📐 Формат графа: v$kGraphFormatVersion');
 
             final storage = LocalFileStorage(directory: outDir);
+            // 🆕 readSignals и readTurnRestrictions включены — нужны для качества маршрутов
             final converter = OsmConverter(
               profile: profile,
               compress: true,
@@ -199,19 +205,16 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: routing-graphs-v1
-          name: "Routing Graphs v1 (geo_route_finder 1.3.0)"
+          name: "Routing Graphs v1 (geo_route_finder 1.4.0)"
           body: |
             Скомпилированные графы дорог для офлайн-навигации.
-
-            **⚠️ ВАЖНО:** Графы собраны с `geo_route_finder 1.3.0` (формат v4).
-            Несовместимы с приложениями на `geo_route_finder < 1.3.0`.
-
+            
+            **⚠️ ВАЖНО:** Графы собраны с `geo_route_finder 1.4.0` (формат v5).
+            
             **Профиль:** ${{ github.event.inputs.profile }}
             **Регион:** ${{ matrix.region_id }}
             **Bbox:** `${{ matrix.bbox }}`
             **Описание:** ${{ matrix.description }}
-
-            **Перекрытия с соседями:** ~10° по долготе, чтобы маршруты между регионами работали.
           files: |
             ${{ matrix.region_id }}_routing_${{ github.event.inputs.profile }}.tar.gz
           draft: false
