@@ -1,8 +1,16 @@
-name: Build Routing Graphs (Russia in 4 parts)
+name: Build Routing Graphs (OSM PBF → GeoGraph)
 
 on:
   workflow_dispatch:
     inputs:
+      region_id:
+        description: 'ID региона (например, russia_ural_center)'
+        default: 'russia_ural_center'
+        type: string
+      bbox:
+        description: 'Bbox: west_lon,south_lat,east_lon,north_lat'
+        default: '43,54,62,62'
+        type: string
       profile:
         description: 'Профиль маршрутизации'
         default: 'car'
@@ -13,55 +21,11 @@ on:
           - motorcycle
 
 jobs:
-  # ═══════════════════════════════════════════════════════════
-  # ЭТАП 1: Скачиваем PBF ОДИН раз и сохраняем как артефакт
-  # ═══════════════════════════════════════════════════════════
-  download-pbf:
+  build-graph:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
-    steps:
-      - name: Download Russia PBF
-        run: |
-          mkdir -p pbf_data
-          echo "📥 Скачиваем russia-latest.osm.pbf..."
-          curl -L --retry 5 --retry-delay 10 \
-            -o pbf_data/russia-latest.osm.pbf \
-            "https://download.geofabrik.de/russia-latest.osm.pbf" || \
-          curl -L --retry 5 \
-            -o pbf_data/russia-latest.osm.pbf \
-            "http://download.openstreetmap.fr/extracts/russia-latest.osm.pbf"
-          ls -lh pbf_data/
-
-      - name: Upload PBF as artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: russia-pbf
-          path: pbf_data/russia-latest.osm.pbf
-          retention-days: 1
-
-  # ═══════════════════════════════════════════════════════════
-  # ЭТАП 2: Параллельная сборка 4-х регионов (matrix)
-  # ═══════════════════════════════════════════════════════════
-  build-graphs:
-    needs: download-pbf
-    runs-on: ubuntu-latest
-    timeout-minutes: 180
-    strategy:
-      fail-fast: false
-      matrix:
-        region:
-          - id: russia_west_europe
-            name: "Европейская часть России"
-            bbox: "19,40,62,82"
-          - id: russia_ural_siberia
-            name: "Урал и Западная Сибирь"
-            bbox: "59,40,97,82"
-          - id: russia_east_siberia
-            name: "Восточная Сибирь"
-            bbox: "94,40,137,82"
-          - id: russia_far_east
-            name: "Дальний Восток"
-            bbox: "134,40,180,82"
+    timeout-minutes: 120
+    permissions:
+      contents: write
 
     steps:
       - uses: actions/checkout@v4
@@ -76,22 +40,27 @@ jobs:
         with:
           sdk: stable
 
-      - name: Download PBF artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: russia-pbf
-          path: pbf_data
+      - name: Download Russia PBF
+        run: |
+          mkdir -p pbf_data
+          echo "📥 Скачиваем russia-latest.osm.pbf..."
+          curl -L --retry 5 --retry-delay 10 \
+            -o pbf_data/russia-latest.osm.pbf \
+            "https://download.geofabrik.de/russia-latest.osm.pbf" || \
+          curl -L --retry 5 \
+            -o pbf_data/russia-latest.osm.pbf \
+            "http://download.openstreetmap.fr/extracts/russia-latest.osm.pbf"
+          ls -lh pbf_data/
 
       - name: Extract bbox
         run: |
           mkdir -p extracts
           osmium extract \
-            --bbox=${{ matrix.region.bbox }} \
+            --bbox=${{ github.event.inputs.bbox }} \
             --overwrite \
-            -o extracts/${{ matrix.region.id }}.osm.pbf \
+            -o extracts/${{ github.event.inputs.region_id }}.osm.pbf \
             pbf_data/russia-latest.osm.pbf
           ls -lh extracts/
-          echo "✅ Файл extracts/${{ matrix.region.id }}.osm.pbf готов"
 
       - name: Compile routing graph
         run: |
@@ -113,11 +82,15 @@ jobs:
             };
 
             print('🔧 Компиляция: $pbfPath → $outDir/$regionId ($profileName)');
+            print('📦 geo_route_finder версия: $geoRouteFinderVersion');
+            print('📐 Формат графа: v$kGraphFormatVersion');
 
             final storage = LocalFileStorage(directory: outDir);
             final converter = OsmConverter(
               profile: profile,
               compress: true,
+              readSignals: true,
+              readTurnRestrictions: true,
             );
 
             final sw = Stopwatch()..start();
@@ -127,14 +100,14 @@ jobs:
               graphId: regionId,
             );
             sw.stop();
-
             print('✅ Граф скомпилирован за ${sw.elapsed.inSeconds} сек');
 
+            // В версии 1.3.0 файлы называются <regionId>_<profile>.ext
             for (final ext in ['.graph', '.index', '.meta']) {
-              final f = File('$outDir/$regionId$ext');
+              final f = File('$outDir/${regionId}_${profileName}$ext');
               if (await f.exists()) {
                 final size = await f.length();
-                print('   📄 $regionId$ext: ${(size / 1024 / 1024).toStringAsFixed(2)} MB');
+                print('   📄 ${regionId}_${profileName}$ext: ${(size / 1024 / 1024).toStringAsFixed(2)} MB');
               }
             }
           }
@@ -146,74 +119,43 @@ jobs:
           environment:
             sdk: ^3.5.0
           dependencies:
-            geo_route_finder: ^1.1.0
+            geo_route_finder: ^1.3.0
           PUBSPEC
-
           dart pub get
           dart run compile_graph.dart \
-            ../extracts/${{ matrix.region.id }}.osm.pbf \
-            ${{ matrix.region.id }} \
+            ../extracts/${{ github.event.inputs.region_id }}.osm.pbf \
+            ${{ github.event.inputs.region_id }} \
             ${{ github.event.inputs.profile }} \
             ../graph_output
 
       - name: Package artifacts
         run: |
+          echo "🔍 Структура graph_output:"
+          find graph_output -type f | sort
           cd graph_output
-          tar -czvf ../${{ matrix.region.id }}_routing_${{ github.event.inputs.profile }}.tar.gz \
+          # 🆕 В 1.3.0 файлы уже называются <regionId>_<profile>.ext
+          tar -czvf ../${{ github.event.inputs.region_id }}_routing_${{ github.event.inputs.profile }}.tar.gz \
             $(find . -name "*.graph" -o -name "*.index" -o -name "*.meta")
           cd ..
           ls -lh *.tar.gz
 
-      - name: Upload graph artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: graph-${{ matrix.region.id }}
-          path: |
-            ${{ matrix.region.id }}_routing_${{ github.event.inputs.profile }}.tar.gz
-            extracts/${{ matrix.region.id }}.osm.pbf
-          retention-days: 1
-
-  # ═══════════════════════════════════════════════════════════
-  # ЭТАП 3: Публикация всех 4-х файлов в ОДИН GitHub Release
-  # ═══════════════════════════════════════════════════════════
-  publish-release:
-    needs: build-graphs
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Download all graph artifacts
-        uses: actions/download-artifact@v4
-        with:
-          pattern: graph-*
-          merge-multiple: true
-          path: release_files
-
-      - name: List release files
-        run: |
-          echo "📦 Файлы для публикации:"
-          ls -lhR release_files/
-
       - name: Publish to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: routing-graphs-russia-4parts
-          name: "Russia Routing Graphs (4 parts)"
+          tag_name: routing-graphs-v1
+          name: "Routing Graphs v1 (geo_route_finder 1.3.0)"
           body: |
-            🇷🇺 Скомпилированные графы дорог России для офлайн-навигации.
-            Разбито на 4 части с перекрытиями ~3° для корректной маршрутизации через границы.
+            Скомпилированные графы дорог для офлайн-навигации.
             
-            **Файлы:**
-            - `russia_west_europe` — Европейская часть (19°E–62°E)
-            - `russia_ural_siberia` — Урал и Зап. Сибирь (59°E–97°E)
-            - `russia_east_siberia` — Восточная Сибирь (94°E–137°E)
-            - `russia_far_east` — Дальний Восток (134°E–180°E)
+            **⚠️ ВАЖНО:** Графы собраны с `geo_route_finder 1.3.0` (формат v4).
+            Несовместимы с приложениями на `geo_route_finder < 1.3.0`.
             
+            **Регион:** ${{ github.event.inputs.region_id }}
+            **Bbox:** `${{ github.event.inputs.bbox }}`
             **Профиль:** ${{ github.event.inputs.profile }}
-            **Формат:** geo_route_finder v1.1.0
+            **Формат:** geo_route_finder v1.3.0 / graph format v$kGraphFormatVersion
           files: |
-            release_files/*.tar.gz
-            release_files/*.osm.pbf
+            ${{ github.event.inputs.region_id }}_routing_${{ github.event.inputs.profile }}.tar.gz
           draft: false
           prerelease: false
         env:
