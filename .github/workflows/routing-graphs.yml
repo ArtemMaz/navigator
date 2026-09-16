@@ -4,12 +4,8 @@ on:
   workflow_dispatch:
     inputs:
       region_id:
-        description: 'ID региона (например, russia_ural_center)'
-        default: 'russia_ural_center'
-        type: string
-      bbox:
-        description: 'Bbox: west_lon,south_lat,east_lon,north_lat'
-        default: '43,54,62,62'
+        description: 'ID региона'
+        default: 'russia'
         type: string
       profile:
         description: 'Профиль маршрутизации'
@@ -23,7 +19,8 @@ on:
 jobs:
   build-graph:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    # 🆕 УВЕЛИЧЕНО: вся Россия может компилироваться 30-90 минут
+    timeout-minutes: 360
     permissions:
       contents: write
 
@@ -40,29 +37,23 @@ jobs:
         with:
           sdk: stable
 
-      - name: Download Russia PBF
+      # 🆕 Скачиваем полный PBF России (без bbox extraction)
+      - name: Download Russia PBF (full country)
         run: |
           mkdir -p pbf_data
-          echo "📥 Скачиваем russia-latest.osm.pbf..."
-          curl -L --retry 5 --retry-delay 10 \
+          echo "📥 Скачиваем russia-latest.osm.pbf (≈3.5 GB)..."
+          # Geofabrik — основной источник (быстрее для больших файлов)
+          curl -L --retry 5 --retry-delay 10 --max-time 1800 \
             -o pbf_data/russia-latest.osm.pbf \
             "https://download.geofabrik.de/russia-latest.osm.pbf" || \
-          curl -L --retry 5 \
+          curl -L --retry 5 --max-time 1800 \
             -o pbf_data/russia-latest.osm.pbf \
             "http://download.openstreetmap.fr/extracts/russia-latest.osm.pbf"
           ls -lh pbf_data/
+          echo "✅ PBF России готов"
 
-      - name: Extract bbox
-        run: |
-          mkdir -p extracts
-          osmium extract \
-            --bbox=${{ github.event.inputs.bbox }} \
-            --overwrite \
-            -o extracts/${{ github.event.inputs.region_id }}.osm.pbf \
-            pbf_data/russia-latest.osm.pbf
-          ls -lh extracts/
-
-      - name: Compile routing graph
+      # 🆕 Пропускаем bbox extraction — используем полный PBF напрямую
+      - name: Compile routing graph (full Russia)
         run: |
           mkdir -p graph_output scripts
           cat > scripts/compile_graph.dart << 'DART_SCRIPT'
@@ -84,6 +75,8 @@ jobs:
             print('🔧 Компиляция: $pbfPath → $outDir/$regionId ($profileName)');
             print('📦 geo_route_finder версия: $geoRouteFinderVersion');
             print('📐 Формат графа: v$kGraphFormatVersion');
+            print('⚠️  ВНИМАНИЕ: компилируется ВСЯ РОССИЯ (≈3.5 GB PBF)');
+            print('⏳ Ожидаемое время: 30-90 минут, потребление RAM: 10-14 GB');
 
             final storage = LocalFileStorage(directory: outDir);
             final converter = OsmConverter(
@@ -93,14 +86,28 @@ jobs:
               readTurnRestrictions: true,
             );
 
+            // 🆕 Логируем прогресс каждые 5 минут
             final sw = Stopwatch()..start();
+            Timer.periodic(const Duration(minutes: 5), (timer) {
+              print('⏰ Идёт ${sw.elapsed.inMinutes} мин...');
+            });
+
             await converter.convert(
               inputFile: pbfPath,
               storage: storage,
               graphId: regionId,
             );
             sw.stop();
-            print('✅ Граф скомпилирован за ${sw.elapsed.inSeconds} сек');
+            print('✅ Граф скомпилирован за ${sw.elapsed.inMinutes} мин ${sw.elapsed.inSeconds % 60} сек');
+
+            // Статистика ограничений
+            final stats = converter.lastRestrictionStats;
+            if (stats != null) {
+              print('📋 Turn restrictions:');
+              print('   • Принято: ${stats.accepted}');
+              print('   • Пропущено: ${stats.skipped}');
+              print('   • Условных: ${stats.conditions}');
+            }
 
             // В версии 1.3.0 файлы называются <regionId>_<profile>.ext
             for (final ext in ['.graph', '.index', '.meta']) {
@@ -122,8 +129,9 @@ jobs:
             geo_route_finder: ^1.3.0
           PUBSPEC
           dart pub get
+          # 🆕 Используем полный PBF России, не extract
           dart run compile_graph.dart \
-            ../extracts/${{ github.event.inputs.region_id }}.osm.pbf \
+            ../pbf_data/russia-latest.osm.pbf \
             ${{ github.event.inputs.region_id }} \
             ${{ github.event.inputs.profile }} \
             ../graph_output
@@ -151,9 +159,9 @@ jobs:
             Несовместимы с приложениями на `geo_route_finder < 1.3.0`.
             
             **Регион:** ${{ github.event.inputs.region_id }}
-            **Bbox:** `${{ github.event.inputs.bbox }}`
             **Профиль:** ${{ github.event.inputs.profile }}
-            **Формат:** geo_route_finder v1.3.0 / graph format v$kGraphFormatVersion
+            **Формат:** geo_route_finder v1.3.0 / graph format v4
+            **Источник:** Geofabrik russia-latest.osm.pbf (вся Россия)
           files: |
             ${{ github.event.inputs.region_id }}_routing_${{ github.event.inputs.profile }}.tar.gz
           draft: false
