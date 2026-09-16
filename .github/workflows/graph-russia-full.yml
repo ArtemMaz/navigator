@@ -1,0 +1,148 @@
+name: Build Graph — Russia Full
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: 'Профиль маршрутизации'
+        default: 'car'
+        type: choice
+        options: [car, bicycle, motorcycle]
+
+jobs:
+  build-graph:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install osmium-tool
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y osmium-tool
+
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+
+      - name: Download Russia PBF
+        run: |
+          mkdir -p pbf_data
+          echo "📥 Скачиваем russia-latest.osm.pbf (~2.5 ГБ)..."
+          curl -L --retry 5 --retry-delay 10 \
+            -o pbf_data/russia-latest.osm.pbf \
+            "https://download.geofabrik.de/russia-latest.osm.pbf" || \
+          curl -L --retry 5 \
+            -o pbf_data/russia-latest.osm.pbf \
+            "http://download.openstreetmap.fr/extracts/russia-latest.osm.pbf"
+          ls -lh pbf_data/
+
+      - name: Compile routing graph
+        run: |
+          mkdir -p graph_output scripts
+          cat > scripts/compile_graph.dart << 'DART_SCRIPT'
+          import 'dart:io';
+          import 'package:geo_route_finder/geo_route_finder.dart';
+
+          Future<void> main(List<String> args) async {
+            final pbfPath = args[0];
+            final regionId = args[1];
+            final profileName = args[2];
+            final outDir = args[3];
+
+            final profile = switch (profileName) {
+              'bicycle' => VehicleProfile.bicycle,
+              'motorcycle' => VehicleProfile.motorcycle,
+              _ => VehicleProfile.car,
+            };
+
+            print('🔧 Компиляция ВСЕЙ РОССИИ: $pbfPath → $outDir ($regionId, $profileName)');
+            print('📊 Файл PBF: ${(await File(pbfPath).length() / 1024 / 1024).toStringAsFixed(0)} МБ');
+
+            final storage = LocalFileStorage(directory: outDir);
+            final converter = OsmConverter(
+              profile: profile,
+              compress: true,
+              readSignals: false,
+              readTurnRestrictions: false,
+            );
+
+            final sw = Stopwatch()..start();
+            await converter.convert(
+              inputFile: pbfPath,
+              storage: storage,
+              graphId: regionId,
+            );
+            sw.stop();
+            print('✅ Граф скомпилирован за ${sw.elapsed.inSeconds} сек (${(sw.elapsed.inMinutes)} мин)');
+
+            for (final ext in ['.graph', '.index', '.meta']) {
+              final f = File('$outDir/$regionId$ext');
+              if (await f.exists()) {
+                final size = await f.length();
+                print('   📄 $regionId$ext: ${(size / 1024 / 1024).toStringAsFixed(2)} MB');
+              }
+            }
+          }
+          DART_SCRIPT
+
+          cd scripts
+          cat > pubspec.yaml << 'PUBSPEC'
+          name: graph_compiler
+          environment:
+            sdk: ^3.5.0
+          dependencies:
+            geo_route_finder: ^1.1.0
+          PUBSPEC
+
+          dart pub get
+          dart run compile_graph.dart \
+            ../pbf_data/russia-latest.osm.pbf \
+            russia \
+            ${{ github.event.inputs.profile }} \
+            ../graph_output
+
+      - name: Package artifacts
+        run: |
+          echo "🔍 Структура graph_output:"
+          ls -lhR graph_output/
+
+          cd graph_output
+          FILES=$(find . -type f \( -name "*.graph" -o -name "*.index" -o -name "*.meta" \))
+          echo "Найдены файлы: $FILES"
+
+          if [ -z "$FILES" ]; then
+            echo "❌ ОШИБКА: Файлы графа не найдены!"
+            exit 1
+          fi
+
+          tar -czvf ../russia_routing_${{ github.event.inputs.profile }}.tar.gz $FILES
+          cd ..
+          ls -lh *.tar.gz
+
+      - name: Publish to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: routing-graphs-full
+          name: "Routing Graphs — Russia Full"
+          body: |
+            Скомпилированный граф дорог **всей России** для офлайн-навигации.
+
+            **Регион:** Россия (полная территория)
+            **Профиль:** ${{ github.event.inputs.profile }}
+            **Формат:** geo_route_finder v1.1.0
+            **Сжатие:** включено (~80% узлов удалено)
+
+            ### 📦 Файлы в архиве:
+            - `russia.graph` — CSR-граф дорог
+            - `russia.index` — KD-дерево для поиска ближайших узлов
+            - `russia.meta` — метаданные (checksum, version)
+          files: |
+            russia_routing_${{ github.event.inputs.profile }}.tar.gz
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
