@@ -1,4 +1,4 @@
-name: Build Routing Graph (Russia Full)
+name: Build Routing Graphs (Russia in 4 parts)
 
 on:
   workflow_dispatch:
@@ -13,32 +13,17 @@ on:
           - motorcycle
 
 jobs:
-  build-graph:
+  # ═══════════════════════════════════════════════════════════
+  # ЭТАП 1: Скачиваем PBF ОДИН раз и сохраняем как артефакт
+  # ═══════════════════════════════════════════════════════════
+  download-pbf:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
-    permissions:
-      contents: write
-
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
-
-      # ═══ 1. Установка osmium-tool (на случай если понадобится) ═══
-      - name: Install osmium-tool
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y osmium-tool
-          osmium --version
-
-      # ═══ 2. Установка Dart SDK ═══
-      - uses: dart-lang/setup-dart@v1
-        with:
-          sdk: stable
-
-      # ═══ 3. Скачиваем полный PBF России (~2.5 ГБ) ═══
       - name: Download Russia PBF
         run: |
           mkdir -p pbf_data
-          echo "📥 Скачиваем russia-latest.osm.pbf (~2.5 ГБ)..."
+          echo "📥 Скачиваем russia-latest.osm.pbf..."
           curl -L --retry 5 --retry-delay 10 \
             -o pbf_data/russia-latest.osm.pbf \
             "https://download.geofabrik.de/russia-latest.osm.pbf" || \
@@ -47,35 +32,94 @@ jobs:
             "http://download.openstreetmap.fr/extracts/russia-latest.osm.pbf"
           ls -lh pbf_data/
 
-      # ═══ 4. Компиляция графа ВСЕЙ РОССИИ через inline Dart-скрипт ═══
+      - name: Upload PBF as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: russia-pbf
+          path: pbf_data/russia-latest.osm.pbf
+          retention-days: 1
+
+  # ═══════════════════════════════════════════════════════════
+  # ЭТАП 2: Параллельная сборка 4-х регионов (matrix)
+  # ═══════════════════════════════════════════════════════════
+  build-graphs:
+    needs: download-pbf
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        region:
+          - id: russia_west_europe
+            name: "Европейская часть России"
+            bbox: "19,40,62,82"
+          - id: russia_ural_siberia
+            name: "Урал и Западная Сибирь"
+            bbox: "59,40,97,82"
+          - id: russia_east_siberia
+            name: "Восточная Сибирь"
+            bbox: "94,40,137,82"
+          - id: russia_far_east
+            name: "Дальний Восток"
+            bbox: "134,40,180,82"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install osmium-tool
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y osmium-tool
+          osmium --version
+
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+
+      - name: Download PBF artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: russia-pbf
+          path: pbf_data
+
+      - name: Extract bbox
+        run: |
+          mkdir -p extracts
+          osmium extract \
+            --bbox=${{ matrix.region.bbox }} \
+            --overwrite \
+            -o extracts/${{ matrix.region.id }}.osm.pbf \
+            pbf_data/russia-latest.osm.pbf
+          ls -lh extracts/
+          echo "✅ Файл extracts/${{ matrix.region.id }}.osm.pbf готов"
+
       - name: Compile routing graph
         run: |
           mkdir -p graph_output scripts
           cat > scripts/compile_graph.dart << 'DART_SCRIPT'
           import 'dart:io';
           import 'package:geo_route_finder/geo_route_finder.dart';
-          
+
           Future<void> main(List<String> args) async {
             final pbfPath = args[0];
             final regionId = args[1];
             final profileName = args[2];
             final outDir = args[3];
-            
+
             final profile = switch (profileName) {
               'bicycle' => VehicleProfile.bicycle,
               'motorcycle' => VehicleProfile.motorcycle,
               _ => VehicleProfile.car,
             };
-            
-            print('🔧 Компиляция ВСЕЙ РОССИИ: $pbfPath → $outDir ($regionId, $profileName)');
-            print('📊 Файл PBF: ${(await File(pbfPath).length() / 1024 / 1024).toStringAsFixed(0)} МБ');
-            
+
+            print('🔧 Компиляция: $pbfPath → $outDir/$regionId ($profileName)');
+
             final storage = LocalFileStorage(directory: outDir);
             final converter = OsmConverter(
               profile: profile,
               compress: true,
             );
-            
+
             final sw = Stopwatch()..start();
             await converter.convert(
               inputFile: pbfPath,
@@ -83,9 +127,9 @@ jobs:
               graphId: regionId,
             );
             sw.stop();
-            print('✅ Граф скомпилирован за ${sw.elapsed.inSeconds} сек (${(sw.elapsed.inMinutes)} мин)');
-            
-            // Выводим размеры файлов
+
+            print('✅ Граф скомпилирован за ${sw.elapsed.inSeconds} сек');
+
             for (final ext in ['.graph', '.index', '.meta']) {
               final f = File('$outDir/$regionId$ext');
               if (await f.exists()) {
@@ -95,7 +139,7 @@ jobs:
             }
           }
           DART_SCRIPT
-          
+
           cd scripts
           cat > pubspec.yaml << 'PUBSPEC'
           name: graph_compiler
@@ -104,53 +148,72 @@ jobs:
           dependencies:
             geo_route_finder: ^1.1.0
           PUBSPEC
-          
+
           dart pub get
           dart run compile_graph.dart \
-            ../pbf_data/russia-latest.osm.pbf \
-            russia \
+            ../extracts/${{ matrix.region.id }}.osm.pbf \
+            ${{ matrix.region.id }} \
             ${{ github.event.inputs.profile }} \
             ../graph_output
 
-      # ═══ 5. Умная упаковка артефактов ═══
       - name: Package artifacts
         run: |
-          echo "🔍 Структура graph_output:"
-          ls -lhR graph_output/
-          
           cd graph_output
-          FILES=$(find . -type f \( -name "*.graph" -o -name "*.index" -o -name "*.meta" \))
-          echo "Найдены файлы: $FILES"
-          
-          if [ -z "$FILES" ]; then
-            echo "❌ ОШИБКА: Файлы графа не найдены!"
-            exit 1
-          fi
-          
-          tar -czvf ../russia_routing_${{ github.event.inputs.profile }}.tar.gz $FILES
+          tar -czvf ../${{ matrix.region.id }}_routing_${{ github.event.inputs.profile }}.tar.gz \
+            $(find . -name "*.graph" -o -name "*.index" -o -name "*.meta")
           cd ..
           ls -lh *.tar.gz
 
-      # ═══ 6. Публикация в GitHub Release ═══
+      - name: Upload graph artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: graph-${{ matrix.region.id }}
+          path: |
+            ${{ matrix.region.id }}_routing_${{ github.event.inputs.profile }}.tar.gz
+            extracts/${{ matrix.region.id }}.osm.pbf
+          retention-days: 1
+
+  # ═══════════════════════════════════════════════════════════
+  # ЭТАП 3: Публикация всех 4-х файлов в ОДИН GitHub Release
+  # ═══════════════════════════════════════════════════════════
+  publish-release:
+    needs: build-graphs
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all graph artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: graph-*
+          merge-multiple: true
+          path: release_files
+
+      - name: List release files
+        run: |
+          echo "📦 Файлы для публикации:"
+          ls -lhR release_files/
+
       - name: Publish to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: routing-graphs-v3
-          name: "Routing Graphs v3 (Russia Full)"
+          tag_name: routing-graphs-russia-4parts
+          name: "Russia Routing Graphs (4 parts)"
           body: |
-            Скомпилированный граф дорог **всей России** для офлайн-навигации.
+            🇷🇺 Скомпилированные графы дорог России для офлайн-навигации.
+            Разбито на 4 части с перекрытиями ~3° для корректной маршрутизации через границы.
             
-            **Регион:** Россия (полная территория)
+            **Файлы:**
+            - `russia_west_europe` — Европейская часть (19°E–62°E)
+            - `russia_ural_siberia` — Урал и Зап. Сибирь (59°E–97°E)
+            - `russia_east_siberia` — Восточная Сибирь (94°E–137°E)
+            - `russia_far_east` — Дальний Восток (134°E–180°E)
+            
             **Профиль:** ${{ github.event.inputs.profile }}
             **Формат:** geo_route_finder v1.1.0
-            **Сжатие:** включено (~80% узлов удалено)
-            
-            ### 📦 Файлы в архиве:
-            - `russia.graph` — CSR-граф дорог
-            - `russia.index` — KD-дерево для поиска ближайших узлов
-            - `russia.meta` — метаданные (checksum, version)
           files: |
-            russia_routing_${{ github.event.inputs.profile }}.tar.gz
+            release_files/*.tar.gz
+            release_files/*.osm.pbf
           draft: false
           prerelease: false
         env:
